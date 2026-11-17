@@ -114,7 +114,7 @@ loginForm.addEventListener('submit', e => {
         const lang = $('loginLanguage').value;
         state.currentLanguage = lang;
         sessionStorage.setItem(KEYS.session, JSON.stringify({ user: TEACHER.username, lang: lang }));
-        showApp();
+        navigate('/app'); // Changes URL to /app and shows the app
     } else {
         loginError.hidden = false;
         loginError.innerHTML = icon('error', 16) + ' Incorrect username or password. Please try again.';
@@ -124,6 +124,10 @@ loginForm.addEventListener('submit', e => {
 });
 
 $('appLanguage')?.addEventListener('change', e => {
+    if (state.recording) {
+        e.target.value = state.currentLanguage; // Revert change if actively recording
+        return;
+    }
     state.currentLanguage = e.target.value;
     sessionStorage.setItem(KEYS.session, JSON.stringify({ user: TEACHER.username, lang: state.currentLanguage }));
     const langName = state.currentLanguage === 'te-IN' ? 'Telugu' : 'English';
@@ -136,7 +140,41 @@ $('appLanguage')?.addEventListener('change', e => {
     renderDashboard();
 });
 
+// Sidebar menu logic
+const menuToggle = $('menuToggle');
+const sidebar = $('sidebar');
+const sidebarBackdrop = $('sidebarBackdrop');
+const closeSidebar = $('closeSidebar');
+
+function openMenu() {
+    if (!sidebar) return;
+    sidebar.classList.add('open');
+    sidebar.setAttribute('aria-hidden', 'false');
+    if (sidebarBackdrop) {
+        sidebarBackdrop.hidden = false;
+        requestAnimationFrame(() => sidebarBackdrop.classList.add('show'));
+    }
+}
+
+function closeMenu() {
+    if (!sidebar) return;
+    sidebar.classList.remove('open');
+    sidebar.setAttribute('aria-hidden', 'true');
+    if (sidebarBackdrop) {
+        sidebarBackdrop.classList.remove('show');
+        setTimeout(() => sidebarBackdrop.hidden = true, 300);
+    }
+}
+
+menuToggle?.addEventListener('click', openMenu);
+closeSidebar?.addEventListener('click', closeMenu);
+sidebarBackdrop?.addEventListener('click', closeMenu);
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeMenu();
+});
+
 $('logoutBtn').addEventListener('click', () => {
+    closeMenu();
     clearTimeout(state.analysisTimer);
     sessionStorage.removeItem(KEYS.session);
     state.selectedStudentId = null;
@@ -147,8 +185,13 @@ $('logoutBtn').addEventListener('click', () => {
     state.recording = false;
     state.manualStop = false;
     dashState.selectedStudentId = null;
-    app.hidden = true;
-    loginScreen.hidden = false;
+
+    // Abort recognition and stop timer safely
+    if (state.recognition) { try { state.recognition.abort(); } catch (e) { } state.recognition = null; }
+    stopTimer();
+    resetReadingPanel(true);
+
+    navigate('/login');
     $('loginLanguage').value = state.currentLanguage;
     $('password').value = '';
     $('username').focus();
@@ -174,22 +217,13 @@ function showApp() {
     renderStudents();
     renderPassageList();
     passageBox.textContent = 'Select a student, then press Start Reading.';
-    renderDashboard();
+    // renderDashboard(); // Removed: handled by tab click when visible
 }
 
 /* =========================================================
    3. TAB NAVIGATION
    ========================================================= */
-document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-        const target = tab.dataset.tab;
-        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
-        document.querySelectorAll('.tabpanel').forEach(p => {
-            p.hidden = p.id !== 'tab-' + target;
-        });
-        if (target === 'dashboard') renderDashboard();
-    });
-});
+/* Tab listeners are handled by the router at the bottom of the file */
 
 /* =========================================================
    4. STUDENTS
@@ -277,6 +311,11 @@ function renderStudents() {
             if (!confirm(`Delete ${s.name} and all their assessment history?`)) return;
             state.students = state.students.filter(x => x.studentId !== s.studentId);
             save(KEYS.students, state.students);
+
+            // Purge orphaned assessments
+            state.assessments = state.assessments.filter(a => a.studentId !== s.studentId);
+            save(KEYS.assessments, state.assessments);
+
             if (state.selectedStudentId === s.studentId) {
                 state.selectedStudentId = null;
                 state.selectedPassageId = null;
@@ -476,6 +515,9 @@ function renderPassagePreview() {
 }
 
 function resetSelection() {
+    clearTimeout(state.analysisTimer);
+    state.analysisTimer = null;
+    state.sessionData = null;
     state.selectedStudentId = null;
     state.selectedPassageId = null;
     reportWrap.innerHTML = '';
@@ -647,9 +689,19 @@ function startReading() {
     };
 
     rec.onend = () => {
-        // Chrome stops automatically after silence — restart while still recording
+        // Restart only if the user hasn't stopped and we're still supposed to record
         if (state.recording && !state.manualStop) {
-            try { rec.start(); } catch (e) { /* already started */ }
+            // Small delay avoids rapid restart loops and microphone "beeping"
+            setTimeout(() => {
+                if (state.recording && !state.manualStop) {
+                    try {
+                        rec.start();
+                    } catch (e) {
+                        console.warn('Restart failed:', e);
+                        fatalStop(icon('error', 16) + ' Microphone session was interrupted. Please press Stop and start again.');
+                    }
+                }
+            }, 100);
         }
     };
 
@@ -686,14 +738,31 @@ function stopReading() {
     stopTimer();
     state.elapsed = (Date.now() - state.startTs) / 1000;
 
-    if (state.recognition) { try { state.recognition.stop(); } catch (e) { } }
+    // SNAPSHOT the state here to prevent corruption from stray clicks
+    state.sessionData = {
+        studentId: state.sessionStudentId,
+        passageId: state.sessionPassageId,
+        finalText: state.finalText,
+        interimText: state.interimText,
+        durationSeconds: Math.max(1, Math.round(state.elapsed))
+    };
+
+    if (state.recognition) {
+        const rec = state.recognition;
+        // Analyse as soon as the engine flushes the final text
+        rec.onend = () => {
+            clearTimeout(state.analysisTimer);
+            state.analysisTimer = setTimeout(analyseAndReport, 250);
+        };
+        try { rec.stop(); } catch (e) { }
+    }
 
     setReadingUI(false);
     setStatus(icon('hourglass', 16) + ' Analysing your reading…', 'info');
 
-    // give the recogniser a moment to flush the final result
+    // Safety net in case onend never fires
     clearTimeout(state.analysisTimer);
-    state.analysisTimer = setTimeout(analyseAndReport, 700);
+    state.analysisTimer = setTimeout(analyseAndReport, 1500);
 }
 
 function setReadingUI(recording) {
@@ -751,8 +820,11 @@ function renderTranscript() {
     }
     transcriptBox.scrollTop = transcriptBox.scrollHeight;
 }
-function resetReadingPanel() {
-    if (state.recording) return;
+function resetReadingPanel(force = false) {
+    if (state.recording && !force) return;
+    clearTimeout(state.analysisTimer);
+    state.analysisTimer = null;
+    state.sessionData = null;
     state.finalText = ''; state.interimText = '';
     state.startTs = 0; state.elapsed = 0;
     transcriptBox.innerHTML = '<span class="muted">Ready…</span>';
@@ -765,8 +837,16 @@ function resetReadingPanel() {
    8. ANALYSIS ENGINE
    ========================================================= */
 function analyseAndReport() {
-    const studentId = state.sessionStudentId;
-    const passageId = state.sessionPassageId;
+    const session = state.sessionData || {
+        studentId: state.sessionStudentId,
+        passageId: state.sessionPassageId,
+        finalText: state.finalText,
+        interimText: state.interimText,
+        durationSeconds: Math.max(1, Math.round(state.elapsed))
+    };
+
+    const studentId = session.studentId;
+    const passageId = session.passageId;
     const student = getStudent(studentId);
     const passage = getPassage(passageId);
 
@@ -777,12 +857,12 @@ function analyseAndReport() {
 
     const refWords = tokenize(passage.referenceText);
 
-    const finalText = state.finalText.trim();
-    const interimText = state.interimText.trim();
+    const finalText = session.finalText.trim();
+    const interimText = session.interimText.trim();
     const usedInterimOnly = !finalText && !!interimText;
     const transcriptForAnalysis = finalText || interimText;
     const hypWords = tokenize(transcriptForAnalysis);
-    const durationSeconds = Math.max(1, Math.round(state.elapsed));
+    const durationSeconds = session.durationSeconds;
 
     if (!hypWords.length) {
         setStatus(icon('warn', 16) + ' No speech was recognised. Check the microphone, speak clearly and try again.', 'err');
@@ -839,10 +919,20 @@ function analyseAndReport() {
     };
     result.suggestions = buildSuggestions(result);
 
-    state.assessments.push(result);
+    // Save a slimmed version without the heavy `ops` array
+    const slimResult = { ...result };
+    delete slimResult.ops;
+    state.assessments.push(slimResult);
     save(KEYS.assessments, state.assessments);
     setStatus(icon('check', 16) + ' Analysis complete. Saved to dashboard.', 'info');
     renderReport(result);
+
+    // Auto-redirect (smooth scroll) to the report page
+    setTimeout(() => {
+        if (reportWrap) {
+            reportWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }, 150);
 }
 
 /* renderStudentProgressSummary removed — no Progress tab */
@@ -891,91 +981,137 @@ function renderReport(r) {
     const missed = uniq(r.missedWords || []);
     const extra = r.extraWords;
 
+    // Calculate SVG progress ring values
+    const radius = 36;
+    const circumference = 2 * Math.PI * radius;
+    const accOffset = circumference - (r.accuracy / 100) * circumference;
+    const cwpmPercent = Math.min(100, (r.correctWordsPerMinute / 60) * 100); // assuming 60 cwpm is 100%
+    const cwpmOffset = circumference - (cwpmPercent / 100) * circumference;
+
+    const accColor = r.accuracy >= 80 ? 'var(--ok)' : r.accuracy >= 60 ? 'var(--warn)' : 'var(--bad)';
+
     reportWrap.innerHTML = `
-    <div class="report">
-      <div class="report-head">
-        <div>
-          <h2 style="margin:0">Live Reading Performance Report</h2>
-          <div class="muted small">
-            ${escapeHtml(student ? student.name : r.studentId)} ·
-            ${escapeHtml(passage ? passage.title : r.passageId)} ·
-            Class ${escapeHtml(student ? student.class : '')}-${escapeHtml(student ? student.section : '')}
-          </div>
+    <div class="premium-report fade-in-up">
+      <div class="premium-header">
+        <div class="header-info">
+            <span class="premium-badge">Performance Report</span>
+            <h2>${escapeHtml(student ? student.name : r.studentId)}</h2>
+            <p class="muted">${escapeHtml(passage ? passage.title : r.passageId)} · Class ${escapeHtml(student ? student.class : '')}-${escapeHtml(student ? student.section : '')}</p>
         </div>
-        <div class="muted small" style="text-align:right">
-          ${date.toLocaleDateString()} ${date.toLocaleTimeString()}<br>
-          Assessment ${escapeHtml(r.assessmentId)}
+        <div class="header-date">
+            <div>${date.toLocaleDateString()}</div>
+            <div class="small">${date.toLocaleTimeString()}</div>
+            <div class="small muted" style="margin-top:4px">ID: ${escapeHtml(r.assessmentId)}</div>
         </div>
       </div>
 
       ${r.needsReview
-            ? `<div class="banner warn">${icon('warn', 18)} Low recognition confidence — please review this attempt before treating the score as a student mistake.</div>`
+            ? `<div class="premium-banner warn">${icon('warn', 18)} Low recognition confidence — please review this attempt before treating the score as a student mistake.</div>`
             : (r.accuracy >= 85
-                ? `<div class="banner good">${icon('check', 18)} Strong reading attempt!</div>`
+                ? `<div class="premium-banner good">${icon('check', 18)} Strong reading attempt!</div>`
                 : '')}
 
-      <div class="metric-grid">
-        <div class="metric"><div class="label">Reading time</div>
-          <div class="value">${r.durationSeconds}<small>s</small></div></div>
-        <div class="metric"><div class="label">Estimated accuracy</div>
-          <div class="value">${r.accuracy}<small>%</small></div></div>
-        <div class="metric"><div class="label">Reading speed</div>
-          <div class="value">${r.wordsPerMinute}<small>wpm</small></div></div>
-        <div class="metric"><div class="label">Correct words / min</div>
-          <div class="value">${r.correctWordsPerMinute}<small>cwpm</small></div></div>
-        <div class="metric"><div class="label">Likely mistakes</div>
-          <div class="value">${r.mistakes}</div></div>
-        <div class="metric"><div class="label">Words read correctly</div>
-          <div class="value">${r.correctCount}<small>/${r.referenceWordCount}</small></div></div>
-      </div>
-
-      <h3 style="margin-top:22px">What the student said</h3>
-      <div class="transcript" style="min-height:auto;max-height:none;font-size:19px;line-height:2">
-        ${r.transcript
-            ? escapeHtml(r.transcript)
-            : '<span class="muted small">Nothing was recognised.</span>'}
-      </div>
-
-      <div class="lists">
-        <div class="list-box">
-          <h3>Missed words (${missed.length})</h3>
-          ${missed.slice(0, 20).map(w => `<span class="chip bad">${escapeHtml(w)}</span>`).join('') || '<span class="muted small">—</span>'}
+      <div class="premium-grid">
+        <!-- Hero Metric 1 -->
+        <div class="glass-card metric-hero">
+            <svg class="progress-ring" width="90" height="90" viewBox="0 0 90 90">
+                <circle class="ring-bg" cx="45" cy="45" r="${radius}" />
+                <circle class="ring-progress" cx="45" cy="45" r="${radius}" 
+                    style="stroke: ${accColor}; stroke-dasharray: ${circumference}; stroke-dashoffset: ${circumference}; --target-offset: ${accOffset};" />
+            </svg>
+            <div class="hero-content">
+                <div class="label">Accuracy</div>
+                <div class="value" style="color: ${accColor}">${r.accuracy}%</div>
+                <div class="sub">${r.correctCount} / ${r.referenceWordCount} words</div>
+            </div>
         </div>
-        <div class="list-box">
-          <h3>Extra words the student said (${extra.length})</h3>
-          ${extra.slice(0, 20).map(w => `<span class="chip extra">${escapeHtml(w)}</span>`).join('') || '<span class="muted small">—</span>'}
+
+        <!-- Hero Metric 2 -->
+        <div class="glass-card metric-hero">
+            <svg class="progress-ring" width="90" height="90" viewBox="0 0 90 90">
+                <circle class="ring-bg" cx="45" cy="45" r="${radius}" />
+                <circle class="ring-progress" cx="45" cy="45" r="${radius}" 
+                    style="stroke: var(--violet); stroke-dasharray: ${circumference}; stroke-dashoffset: ${circumference}; --target-offset: ${cwpmOffset};" />
+            </svg>
+            <div class="hero-content">
+                <div class="label">Speed (CWPM)</div>
+                <div class="value" style="color: var(--violet)">${r.correctWordsPerMinute}</div>
+                <div class="sub">Correct words / min</div>
+            </div>
+        </div>
+
+        <!-- Small Stats -->
+        <div class="glass-card stat-card">
+            <div class="label">Reading Time</div>
+            <div class="value">${r.durationSeconds}<small>s</small></div>
+        </div>
+        <div class="glass-card stat-card">
+            <div class="label">Total WPM</div>
+            <div class="value">${r.wordsPerMinute}</div>
+        </div>
+        <div class="glass-card stat-card">
+            <div class="label">Mistakes</div>
+            <div class="value" style="color: ${r.mistakes > 5 ? 'var(--bad)' : 'var(--ink)'}">${r.mistakes}</div>
         </div>
       </div>
 
-      <div class="suggestions">
-        <div class="telugu-line" lang="te">మీ చదవడం బాగుంది!</div>
-        <h3>Suggested practice</h3>
+      <div class="premium-section">
+        <h3>What the student said</h3>
+        <div class="glass-transcript">
+            ${r.transcript ? escapeHtml(r.transcript) : '<span class="muted small">Nothing was recognised.</span>'}
+        </div>
+      </div>
+
+      <div class="premium-lists">
+        <div class="glass-list">
+          <h3>Missed Words <span class="badge">${missed.length}</span></h3>
+          <div class="chip-container">
+            ${missed.slice(0, 20).map(w => `<span class="premium-chip bad">${escapeHtml(w)}</span>`).join('') || '<span class="muted small">None!</span>'}
+          </div>
+        </div>
+        <div class="glass-list">
+          <h3>Extra Words <span class="badge">${extra.length}</span></h3>
+          <div class="chip-container">
+            ${extra.slice(0, 20).map(w => `<span class="premium-chip extra">${escapeHtml(w)}</span>`).join('') || '<span class="muted small">None!</span>'}
+          </div>
+        </div>
+      </div>
+
+      <div class="premium-suggestions">
+        <div class="suggestion-header">
+            <div class="telugu-line" lang="te">మీ చదవడం బాగుంది!</div>
+            <h3>Suggested Practice</h3>
+        </div>
         <ul>${r.suggestions.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
       </div>
 
-      <div class="row-actions">
-        <button class="btn ghost" id="readAgainBtn">${icon('refresh', 16)} Read again</button>
-        <!-- viewProgressBtn removed: no Progress tab -->
-        <button class="btn ghost" id="exportBtn">${icon('download', 16)} Export report (JSON)</button>
+      <div class="premium-actions">
+        <button class="btn-premium ghost" id="readAgainBtn">${icon('refresh', 18)} Read Again</button>
+        <button class="btn-premium primary" id="exportBtn">${icon('download', 18)} Export JSON</button>
       </div>
     </div>
   `;
 
-
+    // Trigger SVG ring animation
+    setTimeout(() => {
+        document.querySelectorAll('.ring-progress').forEach(el => {
+            el.style.strokeDashoffset = el.style.getPropertyValue('--target-offset');
+        });
+    }, 100);
 
     $('readAgainBtn').addEventListener('click', () => {
         reportWrap.innerHTML = '';
         resetReadingPanel();
         window.scrollTo({ top: 0, behavior: 'smooth' });
     });
-    /* viewProgressBtn listener removed — no Progress tab exists */
+
     $('exportBtn').addEventListener('click', () => {
         const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = `report-${r.studentId}-${r.assessmentId}.json`;
         a.click();
-        URL.revokeObjectURL(a.href);
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     });
 }
 
@@ -1590,7 +1726,7 @@ function exportDashboardCsv() {
     const byId = {};
     state.students.forEach(s => byId[s.studentId] = s);
 
-    const header = ['Student ID', 'Roll', 'Name', 'Class', 'Section',
+    const header = ['Student ID', 'Roll', 'Name', 'Class', 'Section', 'Language',
         'Date', 'Accuracy %', 'CWPM', 'Mistakes', 'Needs Review', 'Transcript'];
     const rows = [header];
 
@@ -1616,18 +1752,121 @@ function exportDashboardCsv() {
 
 init();
 
-const classSel = $('dashClass');
-const secSel = $('dashSection');
-const prevCls = classSel.value || 'ALL';
-const prevSec = secSel.value || 'ALL';
+/* =========================================================
+   13. ROUTING LOGIC (URL Navigation)
+   ========================================================= */
+function currentPath() {
+    return location.hash.replace(/^#/, '') || '/';
+}
 
-classSel.innerHTML = `<option value="ALL">All classes</option>` +
-    classes.map(c => `<option value="${escapeHtml(c)}">Class ${escapeHtml(c)}</option>`).join('');
-secSel.innerHTML = `<option value="ALL">All sections</option>` +
-    sections.map(s => `<option value="${escapeHtml(s)}">Section ${escapeHtml(s)}</option>`).join('');
+function navigate(path) {
+    if (currentPath() !== path) location.hash = path;
+    handleRoute();
+}
 
-classSel.value = (prevCls === 'ALL' || classes.includes(prevCls)) ? prevCls : 'ALL';
-secSel.value = (prevSec === 'ALL' || sections.includes(prevSec)) ? prevSec : 'ALL';
+function replace(path) {
+    if (currentPath() !== path) location.hash = path;
+    handleRoute();
+}
+
+function setActiveTab(name) {
+    document.querySelectorAll('.tab').forEach(t => {
+        const on = t.dataset.tab === name;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tabpanel').forEach(p => {
+        p.hidden = p.id !== 'tab-' + name;
+    });
+    if (name === 'dashboard') renderDashboard();
+}
+
+function handleRoute() {
+    const path = currentPath();
+    const loggedIn = !!sessionStorage.getItem(KEYS.session);
+
+    if (path === '/app' || path === '/dashboard' || path === '/students') {
+        if (!loggedIn) return replace('/login');
+        showApp();
+        if (path !== '/app') setActiveTab(path.slice(1));
+    } else if (path === '/login') {
+        if (loggedIn) return replace('/app');
+        app.hidden = true; loginScreen.hidden = false; $('username').focus();
+    } else {
+        replace(loggedIn ? '/app' : '/login');
+    }
+}
+
+window.addEventListener('hashchange', handleRoute);
+
+// ONLY ONE handler for tabs
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => navigate('/' + tab.dataset.tab));
+});
+
+handleRoute();
+
+/* =========================================================
+   13. ROUTING LOGIC (URL Navigation)
+   ========================================================= */
+function currentPath() {
+    return location.hash.replace(/^#/, '') || '/';
+}
+
+function navigate(path) {
+    if (currentPath() !== path) location.hash = path;
+    handleRoute();
+}
+
+function replace(path) {
+    if (currentPath() !== path) location.hash = path;
+    handleRoute();
+}
+
+function setActiveTab(name) {
+    document.querySelectorAll('.tab').forEach(t => {
+        const on = t.dataset.tab === name;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tabpanel').forEach(p => {
+        p.hidden = p.id !== 'tab-' + name;
+    });
+    if (name === 'dashboard') renderDashboard();
+}
+
+function handleRoute() {
+    const path = currentPath();
+    const loggedIn = !!sessionStorage.getItem(KEYS.session);
+
+    if (path === '/app' || path === '/dashboard' || path === '/students') {
+        if (!loggedIn) return replace('/login');
+        showApp();
+        if (path !== '/app') setActiveTab(path.slice(1));
+    } else if (path === '/login') {
+        if (loggedIn) return replace('/app');
+        app.hidden = true; loginScreen.hidden = false; $('username').focus();
+    } else {
+        replace(loggedIn ? '/app' : '/login');
+    }
+}
+
+window.addEventListener('hashchange', handleRoute);
+
+// ONLY ONE handler for tabs
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => navigate('/' + tab.dataset.tab));
+});
+
+// Fix CSV Header (from duplicate block)
+function fixCsvHeader() {
+    const originalExport = exportDashboardCsv.toString();
+    if (originalExport.includes("['Student ID', 'Roll', 'Name', 'Class', 'Section',\n        'Date'")) {
+        // This is a fallback; ideally you edit the original function directly.
+    }
+}
+
+handleRoute();
 
 function renderDashboard() {
     populateDashFilters();
