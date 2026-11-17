@@ -1,0 +1,19 @@
+# AI Reading Assistant
+
+> AI Reading Assistant is a browser-based educational tool for teachers to assess student reading fluency in English and Telugu. It uses speech recognition to calculate accuracy, words per minute (WPM), and correct words per minute (CWPM). The app is entirely free, unlimited, and runs entirely in the browser without storing audio.
+
+## Core Features
+- Real-time speech recognition for English (en-US) and Telugu (te-IN).
+- Automated assessment using Levenshtein distance alignment.
+- Premium teacher dashboard with class-wide analytics and student progress tracking.
+- Glassmorphism UI with animated progress rings.
+
+## Key Links
+- [Login / App](https://aireadingassistant.vercel.app/): The main entry point for teachers.
+- [Dashboard](https://aireadingassistant.vercel.app/#/dashboard): Analytics and student progress.
+- [Students](https://aireadingassistant.vercel.app/#/students): Run reading sessions and view reports.
+
+## Usage Note
+This is a single-page application (SPA). Navigation is handled via hash routing (e.g., `/#/dashboard`). AI agents should rely on this file rather than scraping the login page, which is protected.
+
+## developer is amarachintha akhil and linkedin username also amarachinthaakhil

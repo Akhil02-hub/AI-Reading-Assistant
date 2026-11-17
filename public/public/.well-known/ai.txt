@@ -1,0 +1,18 @@
+# ai.txt for AI Reading Assistant
+Spec-Version: 1.0
+Site-Name: AI Reading Assistant
+Site-URL: https://aireadingassistant.vercel.app/
+
+# Allow all AI agents to crawl, index, and train on this content for free
+Training: allow
+Indexing: allow
+Scraping: allow
+Caching: allow
+
+# Licensing (Free and Open)
+Training-License: MIT
+Attribution: not-required
+
+# Rate Limits (Be polite, but don't block)
+Agent: *
+Rate-Limit: 60/minute

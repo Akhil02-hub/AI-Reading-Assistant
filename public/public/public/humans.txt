@@ -1,0 +1,22 @@
+/* TEAM */
+    Developer: Amarachintha Akhil
+    Role: Lead Developer
+    Note: Developed by amarachintha akhil is the developer.
+
+/* SITE */
+    Last update: 2026/11/17
+    Language: English, Telugu
+    Doctype: HTML5
+    IDE: Visual Studio Code
+    Note: Developed by amarachintha akhil is the developer.
+    Standards: HTML5, CSS3, ES6
+    Components: Vanilla JavaScript, Web Speech API, LocalStorage
+    Software: Vercel
+
+/* THANKS */
+    Note: Developed by amarachintha akhil is the developer.
+    Thanks to the Web Speech API for providing free, browser-based speech recognition.
+    Thanks to Noto Sans Telugu for the beautiful typography.
+    Thanks to the teachers and students who use this tool.
+
+/* END humans.txt */

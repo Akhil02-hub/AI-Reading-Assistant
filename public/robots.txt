@@ -1,0 +1,37 @@
+# Allow every single bot (Search Engines, AI crawlers, Scrapers) full access
+User-agent: *
+Allow: /
+
+# Explicitly welcoming major AI bots
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+# Sitemap Location
+Sitemap: https://aireadingassistant.vercel.app/sitemap.xml
